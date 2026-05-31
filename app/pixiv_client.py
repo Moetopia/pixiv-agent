@@ -38,6 +38,18 @@ def get_api():
             raise RuntimeError("PIXIV_REFRESH_TOKEN 未配置")
         if _api is None:
             _api = AppPixivAPI()
+            from requests.adapters import HTTPAdapter
+            adapter = HTTPAdapter(pool_connections=20, pool_maxsize=50)
+            _api.requests.mount('http://', adapter)
+            _api.requests.mount('https://', adapter)
+
+            if settings.HTTP_PROXY:
+                proxies = {
+                    "http": settings.HTTP_PROXY,
+                    "https": settings.HTTP_PROXY,
+                }
+                _api.requests.proxies.update(proxies)
+                logger.info(f"🔧 Pixiv API 已启用网络代理: {settings.HTTP_PROXY}")
         _api.auth(refresh_token=settings.PIXIV_REFRESH_TOKEN)
         _token_refreshed_at = now
         logger.info("✅ Pixiv token 已刷新")
@@ -171,7 +183,7 @@ async def download_image(url: str, dest_path: Path) -> bool:
     def _call():
         api = get_api()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        response = api.session.get(
+        response = api.requests.get(
             url,
             headers={"Referer": "https://www.pixiv.net/"},
             timeout=30,
@@ -247,4 +259,5 @@ def parse_illust(illust: dict) -> dict:
         "source_url": f"https://www.pixiv.net/artworks/{illust['id']}",
         "image_urls": meta_page_urls,
         "series": illust.get("series"),
+        "create_date": illust.get("create_date"),
     }

@@ -14,7 +14,7 @@ async def enqueue_author(
 ):
     """将指定 Pixiv 作者加入同步队列。"""
     enqueued = await sync_queue.enqueue(pixiv_user_id)
-    async with await get_db() as db:
+    async with get_db() as db:
         existing = await db.execute_fetchone(
             "SELECT pixiv_user_id, status FROM authors WHERE pixiv_user_id=?",
             (pixiv_user_id,),
@@ -42,7 +42,7 @@ async def sync_status(_: None = Depends(require_api_key)):
 @router.get("/sync/authors")
 async def list_sync_authors(_: None = Depends(require_api_key)):
     """列出所有已追踪作者及同步状态。"""
-    async with await get_db() as db:
+    async with get_db() as db:
         rows = await db.execute_fetchall(
             "SELECT pixiv_user_id, username, status, last_synced_at, artwork_count, created_at FROM authors ORDER BY created_at DESC"
         )
@@ -55,7 +55,7 @@ async def list_jobs(
     _: None = Depends(require_api_key),
 ):
     """列出最近的同步任务记录。"""
-    async with await get_db() as db:
+    async with get_db() as db:
         rows = await db.execute_fetchall(
             "SELECT * FROM sync_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
         )

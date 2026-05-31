@@ -28,7 +28,7 @@ async def list_artworks(
     _: None = Depends(require_api_key),
 ):
     """分页返回已缓存的作品元数据列表。"""
-    async with await get_db() as db:
+    async with get_db() as db:
         conditions = []
         params = []
 
@@ -53,7 +53,7 @@ async def get_artwork(
     _: None = Depends(require_api_key),
 ):
     """获取单个作品元数据（含 images 列表 + 作者用户名）。"""
-    async with await get_db() as db:
+    async with get_db() as db:
         row = await db.execute_fetchone(
             """
             SELECT a.*, au.username AS author_username, au.avatar_url AS author_avatar_url
@@ -83,7 +83,7 @@ async def get_image_file(
     _: None = Depends(require_api_key),
 ):
     """流式返回本地缓存的图片文件。"""
-    async with await get_db() as db:
+    async with get_db() as db:
         row = await db.execute_fetchone(
             "SELECT local_path, downloaded FROM images WHERE pixiv_id=? AND page_index=?",
             (pixiv_id, page_index),
@@ -103,4 +103,30 @@ async def get_image_file(
         ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
     }
     media_type = media_type_map.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media_type)
+
+
+@router.get("/authors/{pixiv_user_id}/avatar")
+async def get_author_avatar(
+    pixiv_user_id: int,
+    _: None = Depends(require_api_key),
+):
+    """返回作者本地头像。"""
+    async with get_db() as db:
+        row = await db.execute_fetchone(
+            "SELECT avatar_local_path FROM authors WHERE pixiv_user_id=?",
+            (pixiv_user_id,)
+        )
+    if not row or not row["avatar_local_path"]:
+        raise HTTPException(status_code=404, detail="作者未找到或头像未下载")
+    
+    path = Path(row["avatar_local_path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="头像文件不存在")
+        
+    media_type_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+    }
+    media_type = media_type_map.get(path.suffix.lower(), "image/jpeg")
     return FileResponse(path, media_type=media_type)

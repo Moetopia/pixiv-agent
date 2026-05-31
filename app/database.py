@@ -5,16 +5,25 @@ SQLite 数据库初始化与连接管理（aiosqlite）。
 import aiosqlite
 from app.config import settings
 
+async def _execute_fetchone(self, sql: str, parameters: tuple = None):
+    async with self.execute(sql, parameters) as cursor:
+        return await cursor.fetchone()
+
+aiosqlite.Connection.execute_fetchone = _execute_fetchone
+
 _db_path = str(settings.DB_PATH)
 
 
-async def get_db() -> aiosqlite.Connection:
-    """返回一个新的 aiosqlite 连接（调用方负责关闭）。"""
-    conn = await aiosqlite.connect(_db_path)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA journal_mode=WAL")
-    await conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def get_db():
+    """返回一个新的 aiosqlite 连接上下文。"""
+    async with aiosqlite.connect(_db_path) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
 
 
 async def init_db() -> None:
@@ -107,6 +116,8 @@ async def init_db() -> None:
             "ALTER TABLE sync_jobs ADD COLUMN retry_after TEXT",
             "ALTER TABLE images    ADD COLUMN retry_count INT NOT NULL DEFAULT 0",
             "ALTER TABLE images    ADD COLUMN retry_after TEXT",
+            "ALTER TABLE artworks  ADD COLUMN series_json TEXT",
+            "ALTER TABLE artworks  ADD COLUMN create_date TEXT",
         ]:
             try:
                 await db.execute(sql)

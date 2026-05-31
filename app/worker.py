@@ -44,7 +44,7 @@ async def _download_author_avatar(pixiv_user_id: int, avatar_url: str) -> None:
         return
     ok = await download_image(avatar_url, dest)
     if ok:
-        async with await get_db() as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE authors SET avatar_local_path=? WHERE pixiv_user_id=?",
                 (str(dest), pixiv_user_id),
@@ -64,16 +64,19 @@ async def _process_illust(db, illust: dict) -> bool:
 
     await db.execute("""
         INSERT INTO artworks (pixiv_id, pixiv_user_id, title, description, tags_json,
-            rating, is_ai, artwork_type, page_count, source_url, fetched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rating, is_ai, artwork_type, page_count, source_url, fetched_at, series_json, create_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(pixiv_id) DO UPDATE SET
             title=excluded.title, description=excluded.description, tags_json=excluded.tags_json,
-            rating=excluded.rating, is_ai=excluded.is_ai, page_count=excluded.page_count, fetched_at=excluded.fetched_at
+            rating=excluded.rating, is_ai=excluded.is_ai, page_count=excluded.page_count, fetched_at=excluded.fetched_at,
+            series_json=excluded.series_json, create_date=excluded.create_date
     """, (
         pixiv_id, parsed["pixiv_user_id"], parsed["title"],
         parsed["description"], json.dumps(parsed["tags"], ensure_ascii=False),
         parsed["rating"], int(parsed["is_ai"]), parsed["artwork_type"],
         parsed["page_count"], parsed["source_url"], _now_iso(),
+        json.dumps(parsed.get("series"), ensure_ascii=False) if parsed.get("series") else None,
+        parsed.get("create_date")
     ))
 
     for idx, url in enumerate(parsed["image_urls"]):
@@ -89,13 +92,21 @@ async def _process_illust(db, illust: dict) -> bool:
 _MAX_IMAGE_RETRIES = 3    # 单张图片下载最大重试次数
 _MAX_AUTHOR_RETRIES = 3   # 单个作者同步任务最大重试次数
 
+_download_sem = None
+
+def _get_download_sem():
+    global _download_sem
+    if _download_sem is None:
+        _download_sem = asyncio.Semaphore(settings.DOWNLOAD_CONCURRENCY)
+    return _download_sem
+
 
 async def _download_pending_images(pixiv_id: int) -> None:
     """
     下载某作品所有未下载图片（并发受 DOWNLOAD_CONCURRENCY 限制）。
     失败时递增 retry_count；超过上限后设置 retry_after（稍后再试）。
     """
-    async with await get_db() as db:
+    async with get_db() as db:
         rows = await db.execute_fetchall(
             """
             SELECT id, page_index, original_url, retry_count
@@ -109,9 +120,13 @@ async def _download_pending_images(pixiv_id: int) -> None:
     if not rows:
         return
 
-    sem = asyncio.Semaphore(settings.DOWNLOAD_CONCURRENCY)
+    logger.info(f"[worker] 作品 {pixiv_id} 加入后台下载队列 ({len(rows)} 张图片)...")
+    sem = _get_download_sem()
+    success_count = 0
+    fail_count = 0
 
     async def _dl(row):
+        nonlocal success_count, fail_count
         async with sem:
             url = row["original_url"]
             idx = row["page_index"]
@@ -121,13 +136,15 @@ async def _download_pending_images(pixiv_id: int) -> None:
                 ext = ".jpg"
             dest = settings.IMAGES_DIR / str(pixiv_id) / f"p{idx}{ext}"
             ok = await download_image(url, dest)
-            async with await get_db() as db2:
+            async with get_db() as db2:
                 if ok:
+                    success_count += 1
                     await db2.execute(
                         "UPDATE images SET downloaded=1, local_path=?, retry_count=? WHERE id=?",
                         (str(dest), retry_count, row["id"]),
                     )
                 else:
+                    fail_count += 1
                     new_retry = retry_count + 1
                     if new_retry >= _MAX_IMAGE_RETRIES:
                         # 暂时搁置：10 分钟后再试
@@ -146,6 +163,7 @@ async def _download_pending_images(pixiv_id: int) -> None:
                 await db2.commit()
 
     await asyncio.gather(*[_dl(r) for r in rows])
+    logger.info(f"[worker] 作品 {pixiv_id} 后台图片下载完成: 成功 {success_count}, 失败 {fail_count}")
 
 
 async def _retry_stale_images() -> None:
@@ -153,7 +171,7 @@ async def _retry_stale_images() -> None:
     重置 retry_after 到期的图片（重新允许下载）。
     由 worker_loop 定期调用。
     """
-    async with await get_db() as db:
+    async with get_db() as db:
         result = await db.execute(
             """
             UPDATE images
@@ -173,7 +191,7 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
     """拉取指定作者的所有作品，下载图片并写入 SQLite。"""
     logger.info(f"[worker] 开始同步作者 {pixiv_user_id} (job={job_id})")
 
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             "UPDATE sync_jobs SET status='running', started_at=? WHERE id=?",
             (_now_iso(), job_id),
@@ -183,7 +201,7 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
     try:
         author_data = await rate_limited_call(lambda: fetch_user_detail(pixiv_user_id))
         if author_data:
-            async with await get_db() as db:
+            async with get_db() as db:
                 await _upsert_author(db, author_data)
                 await db.commit()
             await _download_author_avatar(pixiv_user_id, author_data.get("avatar_url", ""))
@@ -204,7 +222,7 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
             if not illusts:
                 break
 
-            async with await get_db() as db:
+            async with get_db() as db:
                 for illust in illusts:
                     is_new = await _process_illust(db, illust)
                     total_found += 1
@@ -226,7 +244,7 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
             params = _parse_next_url_offset(next_url)
             offset = params.get("offset", offset + 30)
 
-        async with await get_db() as db:
+        async with get_db() as db:
             await db.execute("""
                 UPDATE sync_jobs SET status='done', finished_at=?, artworks_found=?, artworks_new=?
                 WHERE id=?
@@ -245,7 +263,7 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
         logger.warning(
             f"[worker] 作者 {pixiv_user_id} 遭遇 429 限速，已重新入队 (job={job_id})"
         )
-        async with await get_db() as db:
+        async with get_db() as db:
             await db.execute(
                 "UPDATE sync_jobs SET status='rate_limited', error=? WHERE id=?",
                 (str(e), job_id),
@@ -259,7 +277,7 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
 
     except Exception as e:
         logger.error(f"[worker] 作者 {pixiv_user_id} 同步失败: {e}", exc_info=True)
-        async with await get_db() as db:
+        async with get_db() as db:
             cur = await db.execute(
                 "SELECT retry_count FROM sync_jobs WHERE id=?", (job_id,)
             )
@@ -305,7 +323,14 @@ def _parse_next_url_offset(next_url: str) -> dict:
     """从 next_url 解析 offset 参数。"""
     from urllib.parse import urlparse, parse_qs
     params = parse_qs(urlparse(next_url).query)
-    return {k: int(v[0]) for k, v in params.items() if v}
+    res = {}
+    for k, v in params.items():
+        if v:
+            try:
+                res[k] = int(v[0])
+            except ValueError:
+                res[k] = v[0]
+    return res
 
 
 _stale_image_check_interval = 300  # 每 5 分钟检查一次过期重试图片
@@ -327,7 +352,7 @@ async def worker_loop() -> None:
             pixiv_user_id = await asyncio.wait_for(
                 sync_queue.get(), timeout=_stale_image_check_interval
             )
-            async with await get_db() as db:
+            async with get_db() as db:
                 cursor = await db.execute(
                     "INSERT INTO sync_jobs (pixiv_user_id, status) VALUES (?, 'running') RETURNING id",
                     (pixiv_user_id,),

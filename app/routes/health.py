@@ -16,7 +16,7 @@ async def health(
     from datetime import datetime, timezone
 
     # 基础统计
-    async with await get_db() as db:
+    async with get_db() as db:
         total_artworks = (await db.execute_fetchone("SELECT COUNT(*) FROM artworks"))[0]
         total_images = (await db.execute_fetchone("SELECT COUNT(*) FROM images"))[0]
         downloaded_images = (await db.execute_fetchone("SELECT COUNT(*) FROM images WHERE downloaded=1"))[0]
@@ -26,6 +26,9 @@ async def health(
         pending_jobs = (await db.execute_fetchone(
             "SELECT COUNT(*) FROM sync_jobs WHERE status IN ('running','pending','rate_limited','retry')"
         ))[0]
+        current_job = await db.execute_fetchone(
+            "SELECT pixiv_user_id, started_at FROM sync_jobs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+        )
 
     resp = {
         "status": "online",
@@ -39,6 +42,8 @@ async def health(
             "downloaded_images": downloaded_images,
             "failed_images": failed_images,
             "pending_jobs": pending_jobs,
+            "current_job_user_id": current_job["pixiv_user_id"] if current_job else None,
+            "current_job_started_at": current_job["started_at"] if current_job else None,
         },
     }
     if include_logs:

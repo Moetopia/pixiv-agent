@@ -38,6 +38,30 @@ async def lifespan(app: FastAPI):
         logger.warning("⚠️  PIXIV_REFRESH_TOKEN 未配置，同步功能将不可用")
 
     from app.worker import worker_loop
+    
+    # 恢复异常中断或遗留的同步任务
+    from app.database import get_db
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT pixiv_user_id FROM sync_jobs WHERE status IN ('running', 'pending', 'rate_limited', 'retry')"
+        )
+        rows = await cursor.fetchall()
+        if rows:
+            logger.info(f"🔄 发现 {len(rows)} 个异常中断的任务，正在恢复...")
+            for row in rows:
+                uid = row[0]
+                await db.execute(
+                    "UPDATE sync_jobs SET status='pending' WHERE pixiv_user_id=? AND status IN ('running', 'pending', 'rate_limited', 'retry')",
+                    (uid,)
+                )
+                await db.execute(
+                    "UPDATE authors SET status='pending' WHERE pixiv_user_id=?",
+                    (uid,)
+                )
+                await db.commit()
+                await sync_queue.enqueue(uid)
+            logger.info("✅ 任务恢复完成，已重新加入内存队列")
+            
     _worker_task = asyncio.create_task(worker_loop())
     logger.info("✅ 后台 worker 已启动")
 
@@ -74,3 +98,8 @@ async def root():
         "version": settings.VERSION,
         "status": "online",
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.PORT)
