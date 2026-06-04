@@ -153,15 +153,16 @@ async def fetch_user_detail(pixiv_user_id: int) -> Optional[dict]:
         "avatar_url": user.get("profile_image_urls", {}).get("medium"),
         "website_url": profile.get("webpage") or None,
         "twitter_url": profile.get("twitter_url") or None,
+        "background_url": profile.get("background_image_url") or None,
     }
 
 
-async def fetch_user_illusts_page(pixiv_user_id: int, offset: int = 0) -> Optional[dict]:
+async def fetch_user_illusts_page(pixiv_user_id: int, offset: int = 0, type: str = "illust") -> Optional[dict]:
     """拉取用户作品列表的一页，含重试和 429 兜底。"""
     def _call():
         api = get_api()
-        return api.user_illusts(pixiv_user_id, type="illust", offset=offset)
-    return await _api_call_with_retry(_call, f"user_illusts({pixiv_user_id}, offset={offset})")
+        return api.user_illusts(pixiv_user_id, type=type, offset=offset)
+    return await _api_call_with_retry(_call, f"user_illusts({pixiv_user_id}, type={type}, offset={offset})")
 
 
 async def fetch_illust_detail(pixiv_id: int) -> Optional[dict]:

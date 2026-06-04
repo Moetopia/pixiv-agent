@@ -13,22 +13,20 @@ aiosqlite.Connection.execute_fetchone = _execute_fetchone
 
 _db_path = str(settings.DB_PATH)
 
-
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def get_db():
     """返回一个新的 aiosqlite 连接上下文。"""
-    async with aiosqlite.connect(_db_path) as conn:
+    async with aiosqlite.connect(_db_path, timeout=30.0) as conn:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA foreign_keys=ON")
         yield conn
 
-
 async def init_db() -> None:
     """建表（如不存在则创建）。"""
-    async with aiosqlite.connect(_db_path) as db:
+    async with aiosqlite.connect(_db_path, timeout=30.0) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
@@ -42,6 +40,8 @@ async def init_db() -> None:
                 twitter_url     TEXT,
                 avatar_url      TEXT,
                 avatar_local_path TEXT,
+                background_url  TEXT,
+                background_local_path TEXT,
                 status          TEXT    NOT NULL DEFAULT 'pending',
                 last_synced_at  TEXT,
                 artwork_count   INTEGER NOT NULL DEFAULT 0,
@@ -123,5 +123,12 @@ async def init_db() -> None:
                 await db.execute(sql)
             except Exception:
                 pass  # 列已存在
+
+        # 尝试为现有的 authors 表添加 background 字段（简单迁移）
+        try:
+            await db.execute("ALTER TABLE authors ADD COLUMN background_url TEXT;")
+            await db.execute("ALTER TABLE authors ADD COLUMN background_local_path TEXT;")
+        except Exception:
+            pass  # 如果列已存在会抛错，直接忽略即可
 
         await db.commit()

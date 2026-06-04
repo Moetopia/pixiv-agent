@@ -21,15 +21,16 @@ def _now_iso() -> str:
 
 async def _upsert_author(db, author_data: dict) -> None:
     await db.execute("""
-        INSERT INTO authors (pixiv_user_id, username, bio, website_url, twitter_url, avatar_url, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO authors (pixiv_user_id, username, bio, website_url, twitter_url, avatar_url, background_url, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(pixiv_user_id) DO UPDATE SET
             username=excluded.username, bio=excluded.bio, website_url=excluded.website_url,
-            twitter_url=excluded.twitter_url, avatar_url=excluded.avatar_url, updated_at=excluded.updated_at
+            twitter_url=excluded.twitter_url, avatar_url=excluded.avatar_url,
+            background_url=excluded.background_url, updated_at=excluded.updated_at
     """, (
         author_data["pixiv_user_id"], author_data.get("username", ""),
         author_data.get("bio"), author_data.get("website_url"), author_data.get("twitter_url"),
-        author_data.get("avatar_url"), _now_iso(),
+        author_data.get("avatar_url"), author_data.get("background_url"), _now_iso(),
     ))
 
 
@@ -52,39 +53,74 @@ async def _download_author_avatar(pixiv_user_id: int, avatar_url: str) -> None:
             await db.commit()
 
 
-async def _process_illust(db, illust: dict) -> bool:
+async def _download_author_background(pixiv_user_id: int, background_url: str) -> None:
+    if not background_url:
+        return
+    ext = "." + background_url.rsplit(".", 1)[-1].split("?")[0]
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        ext = ".jpg"
+    dest = settings.IMAGES_DIR / "avatars" / f"bg_{pixiv_user_id}{ext}"
+    if dest.exists():
+        return
+    ok = await download_image(background_url, dest)
+    if ok:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE authors SET background_local_path=? WHERE pixiv_user_id=?",
+                (str(dest), pixiv_user_id),
+            )
+            await db.commit()
+
+
+async def _process_illust(illust: dict) -> bool:
     """处理单个作品：入库元数据 + 触发图片下载。返回是否为新作品。"""
+    pixiv_id = illust["id"]
+
+    async with get_db() as db:
+        existing = await db.execute_fetchone(
+            "SELECT pixiv_id, series_json FROM artworks WHERE pixiv_id=?", (pixiv_id,)
+        )
+        is_new = existing is None
+        needs_detail = is_new or (existing and existing["series_json"] is None)
+
+    if needs_detail:
+        from app.pixiv_client import fetch_illust_detail
+        from app.queue import rate_limited_call
+        detail = await rate_limited_call(lambda: fetch_illust_detail(pixiv_id))
+        if detail:
+            illust = detail
+
     parsed = parse_illust(illust)
-    pixiv_id = parsed["pixiv_id"]
 
-    existing = await db.execute_fetchone(
-        "SELECT pixiv_id FROM artworks WHERE pixiv_id=?", (pixiv_id,)
-    )
-    is_new = existing is None
+    series_data = parsed.get("series")
+    series_json_str = json.dumps(series_data, ensure_ascii=False) if series_data else "{}"
 
-    await db.execute("""
-        INSERT INTO artworks (pixiv_id, pixiv_user_id, title, description, tags_json,
-            rating, is_ai, artwork_type, page_count, source_url, fetched_at, series_json, create_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(pixiv_id) DO UPDATE SET
-            title=excluded.title, description=excluded.description, tags_json=excluded.tags_json,
-            rating=excluded.rating, is_ai=excluded.is_ai, page_count=excluded.page_count, fetched_at=excluded.fetched_at,
-            series_json=excluded.series_json, create_date=excluded.create_date
-    """, (
-        pixiv_id, parsed["pixiv_user_id"], parsed["title"],
-        parsed["description"], json.dumps(parsed["tags"], ensure_ascii=False),
-        parsed["rating"], int(parsed["is_ai"]), parsed["artwork_type"],
-        parsed["page_count"], parsed["source_url"], _now_iso(),
-        json.dumps(parsed.get("series"), ensure_ascii=False) if parsed.get("series") else None,
-        parsed.get("create_date")
-    ))
-
-    for idx, url in enumerate(parsed["image_urls"]):
+    async with get_db() as db:
         await db.execute("""
-            INSERT INTO images (pixiv_id, page_index, original_url)
-            VALUES (?, ?, ?)
-            ON CONFLICT(pixiv_id, page_index) DO NOTHING
-        """, (pixiv_id, idx, url))
+            INSERT INTO artworks (pixiv_id, pixiv_user_id, title, description, tags_json,
+                rating, is_ai, artwork_type, page_count, source_url, fetched_at, series_json, create_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pixiv_id) DO UPDATE SET
+                title=excluded.title, description=excluded.description, tags_json=excluded.tags_json,
+                rating=excluded.rating, is_ai=excluded.is_ai, page_count=excluded.page_count, fetched_at=excluded.fetched_at,
+                series_json=excluded.series_json, create_date=excluded.create_date
+        """, (
+            pixiv_id, parsed["pixiv_user_id"], parsed["title"],
+            parsed["description"], json.dumps(parsed["tags"], ensure_ascii=False),
+            parsed["rating"], int(parsed["is_ai"]), parsed["artwork_type"],
+            parsed["page_count"], parsed["source_url"], _now_iso(),
+            series_json_str,
+            parsed.get("create_date")
+        ))
+
+        for idx, url in enumerate(parsed["image_urls"]):
+            await db.execute("""
+                INSERT INTO images (pixiv_id, page_index, original_url)
+                VALUES (?, ?, ?)
+                ON CONFLICT(pixiv_id, page_index) DO NOTHING
+            """, (pixiv_id, idx, url))
+        
+        await db.commit()
 
     return is_new
 
@@ -135,13 +171,34 @@ async def _download_pending_images(pixiv_id: int) -> None:
             if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
                 ext = ".jpg"
             dest = settings.IMAGES_DIR / str(pixiv_id) / f"p{idx}{ext}"
-            ok = await download_image(url, dest)
+
+            file_is_valid = False
+            if dest.exists() and dest.stat().st_size > 0:
+                try:
+                    from PIL import Image as PILImage
+                    with PILImage.open(dest) as img:
+                        img.verify()
+                    file_is_valid = True
+                    logger.debug(f"[worker] 图片已存在且完整，跳过下载: {dest}")
+                except Exception:
+                    pass
+
+            if file_is_valid:
+                ok = True
+            else:
+                ok = await download_image(url, dest)
+
             async with get_db() as db2:
                 if ok:
                     success_count += 1
                     await db2.execute(
                         "UPDATE images SET downloaded=1, local_path=?, retry_count=? WHERE id=?",
                         (str(dest), retry_count, row["id"]),
+                    )
+                    # Bump artwork's fetched_at so the backend polling picks it up
+                    await db2.execute(
+                        "UPDATE artworks SET fetched_at=datetime('now') WHERE pixiv_id=?",
+                        (pixiv_id,)
                     )
                 else:
                     fail_count += 1
@@ -205,44 +262,49 @@ async def _sync_author(job_id: int, pixiv_user_id: int) -> None:
                 await _upsert_author(db, author_data)
                 await db.commit()
             await _download_author_avatar(pixiv_user_id, author_data.get("avatar_url", ""))
+            await _download_author_background(pixiv_user_id, author_data.get("background_url", ""))
 
-        offset = 0
         total_found = 0
         total_new = 0
         max_artworks = settings.MAX_ARTWORKS_PER_AUTHOR
 
-        while True:
-            result = await rate_limited_call(
-                lambda: fetch_user_illusts_page(pixiv_user_id, offset)
-            )
-            if not result or result.get("error"):
-                break
+        for work_type in ["illust", "manga"]:
+            offset = 0
+            while True:
+                result = await rate_limited_call(
+                    lambda w_type=work_type, off=offset: fetch_user_illusts_page(pixiv_user_id, off, type=w_type)
+                )
+                if not result or result.get("error"):
+                    break
 
-            illusts = result.get("illusts", [])
-            if not illusts:
-                break
+                illusts = result.get("illusts", [])
+                if not illusts:
+                    break
 
-            async with get_db() as db:
                 for illust in illusts:
-                    is_new = await _process_illust(db, illust)
+                    is_new = await _process_illust(illust)
                     total_found += 1
                     if is_new:
                         total_new += 1
-                await db.commit()
 
-            for illust in illusts:
-                asyncio.create_task(_download_pending_images(illust["id"]))
+                for illust in illusts:
+                    asyncio.create_task(_download_pending_images(illust["id"]))
+
+                if max_artworks and total_found >= max_artworks:
+                    logger.info(f"  达到 MAX_ARTWORKS_PER_AUTHOR={max_artworks}，停止")
+                    break
+
+                next_url = result.get("next_url")
+                if not next_url:
+                    break
+
+                params = _parse_next_url_offset(next_url)
+                if not params or "offset" not in params:
+                    break
+                offset = int(params["offset"])
 
             if max_artworks and total_found >= max_artworks:
-                logger.info(f"  达到 MAX_ARTWORKS_PER_AUTHOR={max_artworks}，停止")
                 break
-
-            next_url = result.get("next_url")
-            if not next_url:
-                break
-
-            params = _parse_next_url_offset(next_url)
-            offset = params.get("offset", offset + 30)
 
         async with get_db() as db:
             await db.execute("""
