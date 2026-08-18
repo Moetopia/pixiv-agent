@@ -3,6 +3,7 @@ from app.auth import require_api_key
 from app.config import settings
 from app.database import get_db
 from app.queue import sync_queue
+from app.storage import cleanup_old_images, get_storage_status
 
 router = APIRouter()
 
@@ -13,6 +14,15 @@ async def enqueue_author(
     _: None = Depends(require_api_key),
 ):
     """将指定 Pixiv 作者加入同步队列。"""
+    storage = get_storage_status()
+    if storage["state"] in {"degraded", "full"}:
+        await cleanup_old_images()
+        storage = get_storage_status()
+    if storage["state"] in {"degraded", "full", "unknown"}:
+        raise HTTPException(status_code=503, detail={
+            "message": "节点磁盘空间不足，已暂停新的同步任务",
+            "storage": storage,
+        })
     enqueued = await sync_queue.enqueue(pixiv_user_id)
     async with get_db() as db:
         existing = await db.execute_fetchone(

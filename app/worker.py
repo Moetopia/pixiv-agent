@@ -142,6 +142,17 @@ async def _download_pending_images(pixiv_id: int) -> None:
     下载某作品所有未下载图片（并发受 DOWNLOAD_CONCURRENCY 限制）。
     失败时递增 retry_count；超过上限后设置 retry_after（稍后再试）。
     """
+    from app.storage import cleanup_old_images, get_storage_status
+
+    storage = get_storage_status()
+    if storage["state"] in {"degraded", "full"}:
+        # 同步过程中空间可能刚刚跌破阈值，先滚动清理再决定是否继续写文件。
+        await cleanup_old_images()
+        storage = get_storage_status()
+        if storage["state"] in {"degraded", "full"}:
+            logger.warning("[worker] 磁盘空间不足，暂停作品 %s 的图片下载", pixiv_id)
+            return
+
     async with get_db() as db:
         rows = await db.execute_fetchall(
             """
@@ -399,9 +410,10 @@ _stale_image_check_interval = 300  # 每 5 分钟检查一次过期重试图片
 
 
 async def worker_loop() -> None:
-    """主循环：持续从队列取作者 ID 并处理，定期清理过期重试图片。"""
+    """主循环：持续从队列取作者 ID，并定期滚动清理旧图片。"""
     logger.info("[worker] 后台 worker 已启动")
     last_stale_check = 0.0
+    last_cache_cleanup = 0.0
     while True:
         try:
             # 定期清理过期重试图片
@@ -410,6 +422,12 @@ async def worker_loop() -> None:
             if now - last_stale_check > _stale_image_check_interval:
                 asyncio.create_task(_retry_stale_images())
                 last_stale_check = now
+
+            from app.storage import cleanup_old_images
+            if now - last_cache_cleanup > settings.CACHE_CLEANUP_INTERVAL_SECONDS:
+                # 清理完成后再继续消费队列，避免低空间时继续产生图片写入。
+                await cleanup_old_images()
+                last_cache_cleanup = now
 
             pixiv_user_id = await asyncio.wait_for(
                 sync_queue.get(), timeout=_stale_image_check_interval

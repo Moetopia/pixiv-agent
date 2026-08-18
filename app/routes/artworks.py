@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -129,6 +130,18 @@ async def get_image_file(
     path = Path(row["local_path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="图片文件不存在")
+
+    # 记录主服务器实际取到图片的时间，供滚动清理确认“已同步”状态。
+    try:
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE images SET last_served_at=? WHERE pixiv_id=? AND page_index=?",
+                (datetime.now(timezone.utc).isoformat(timespec="seconds"), pixiv_id, page_index),
+            )
+            await db.commit()
+    except Exception:
+        # 磁盘紧张时不影响已经存在的图片继续返回。
+        pass
 
     media_type_map = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",

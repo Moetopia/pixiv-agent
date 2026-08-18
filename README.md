@@ -50,6 +50,12 @@ uvicorn app.main:app --host 0.0.0.0 --port 8100
 | `MAX_ARTWORKS_PER_AUTHOR` | 每作者最大作品数（0=无限） | `0` |
 | `NODE_NAME` | 节点名称 | `agent-01` |
 | `DATA_DIR` | SQLite + 图片缓存目录 | `./data` |
+| `CACHE_CLEANUP_ENABLED` | 磁盘不足时是否滚动清理图片 | `true` |
+| `CACHE_CLEANUP_THRESHOLD_PERCENT` | 开始清理的剩余空间比例 | `15` |
+| `CACHE_CLEANUP_TARGET_PERCENT` | 清理停止的剩余空间比例 | `20` |
+| `CACHE_CLEANUP_MIN_AGE_DAYS` | 图片至少保留天数 | `7` |
+| `CACHE_CLEANUP_ONLY_SERVED` | 是否只清理主服务器已取过的图片 | `true` |
+| `CACHE_PAUSE_SYNC_PERCENT` | 低于此比例暂停新同步 | `5` |
 
 ## Docker
 

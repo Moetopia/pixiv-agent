@@ -116,6 +116,7 @@ async def init_db() -> None:
             "ALTER TABLE sync_jobs ADD COLUMN retry_after TEXT",
             "ALTER TABLE images    ADD COLUMN retry_count INT NOT NULL DEFAULT 0",
             "ALTER TABLE images    ADD COLUMN retry_after TEXT",
+            "ALTER TABLE images    ADD COLUMN last_served_at TEXT",
             "ALTER TABLE artworks  ADD COLUMN series_json TEXT",
             "ALTER TABLE artworks  ADD COLUMN create_date TEXT",
         ]:

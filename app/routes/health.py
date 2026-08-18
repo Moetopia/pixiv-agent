@@ -14,27 +14,36 @@ async def health(
     """节点状态：队列深度、冷却状态、版本、节点名称。"""
     from app.database import get_db
     from datetime import datetime, timezone
+    from app.storage import get_storage_status
 
-    # 基础统计
-    async with get_db() as db:
-        total_artworks = (await db.execute_fetchone("SELECT COUNT(*) FROM artworks"))[0]
-        total_images = (await db.execute_fetchone("SELECT COUNT(*) FROM images"))[0]
-        downloaded_images = (await db.execute_fetchone("SELECT COUNT(*) FROM images WHERE downloaded=1"))[0]
-        failed_images = (await db.execute_fetchone(
-            "SELECT COUNT(*) FROM images WHERE failed=1 OR (retry_count>=3 AND retry_after IS NOT NULL)"
-        ))[0]
-        pending_jobs = (await db.execute_fetchone(
-            "SELECT COUNT(*) FROM sync_jobs WHERE status IN ('running','pending','rate_limited','retry')"
-        ))[0]
-        current_job = await db.execute_fetchone(
-            "SELECT pixiv_user_id, started_at FROM sync_jobs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
-        )
+    storage = get_storage_status()
+    # 磁盘写满时 SQLite 查询本身也可能失败，健康接口仍要能返回空间状态。
+    stats_error = None
+    try:
+        async with get_db() as db:
+            total_artworks = (await db.execute_fetchone("SELECT COUNT(*) FROM artworks"))[0]
+            total_images = (await db.execute_fetchone("SELECT COUNT(*) FROM images"))[0]
+            downloaded_images = (await db.execute_fetchone("SELECT COUNT(*) FROM images WHERE downloaded=1"))[0]
+            failed_images = (await db.execute_fetchone(
+                "SELECT COUNT(*) FROM images WHERE failed=1 OR (retry_count>=3 AND retry_after IS NOT NULL)"
+            ))[0]
+            pending_jobs = (await db.execute_fetchone(
+                "SELECT COUNT(*) FROM sync_jobs WHERE status IN ('running','pending','rate_limited','retry')"
+            ))[0]
+            current_job = await db.execute_fetchone(
+                "SELECT pixiv_user_id, started_at FROM sync_jobs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            )
+    except Exception as exc:
+        total_artworks = total_images = downloaded_images = failed_images = pending_jobs = None
+        current_job = None
+        stats_error = str(exc)
 
     resp = {
-        "status": "online",
+        "status": "degraded" if storage["state"] in {"degraded", "full", "unknown"} else "online",
         "node_name": settings.NODE_NAME,
         "version": settings.VERSION,
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "storage": storage,
         "queue": sync_queue.status(),
         "stats": {
             "total_artworks": total_artworks,
@@ -46,6 +55,8 @@ async def health(
             "current_job_started_at": current_job["started_at"] if current_job else None,
         },
     }
+    if stats_error:
+        resp["stats"]["error"] = stats_error
     if include_logs:
         from app.log_collector import get_recent_logs_memory
         resp["recent_logs"] = get_recent_logs_memory(50)
